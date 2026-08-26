@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# omarchy-resolve-fix -- repair the AUR davinci-resolve-studio install.
+#
+# The AUR package unpacks Blackmagic's archive but skips two things the
+# official .run installer does at install time. Both break Resolve silently,
+# and both are undone by every package upgrade, which is why this is
+# idempotent and wired to a pacman hook.
+#
+#   1. /opt/resolve/Extras and /opt/resolve/Fairlight are never created.
+#      They live under root-owned /opt/resolve, so Resolve -- running as your
+#      user -- cannot create them and fails on every launch:
+#        "Failed to initialize DDM: failed to create storage dir
+#         '/opt/resolve/Extras' (Permission denied)"  ->  "DDM init failed."
+#        "mkdir failed for directory '/opt/resolve/Fairlight' (errno 13)"
+#      DDM is the DaVinci Download Manager. With it dead, Resolve can never
+#      fetch its downloadable content packages -- including the ~2.2 GiB of
+#      TensorRT engines behind the entire DaVinci Neural Engine feature set.
+#
+#   2. libDaVinciPanelAPI.so / libFairlightPanelAPI.so are never linked into
+#      /usr/lib64. DaVinciPanelDaemon and libDaVinciPanels.so dlopen() them by
+#      ABSOLUTE hardcoded path, so LD_LIBRARY_PATH cannot help. The dlopen
+#      fails, the API version falls back to its 0.0 default, and the daemon
+#      quits before enumerating any hardware:
+#        "Unsupported DaVinci Panel API Version (0.0), please update"
+#      Result: DaVinci Resolve Micro/Mini panels are never detected, even
+#      though the USB device and its udev permissions are perfectly fine.
+#
+# Usage:
+#   sudo omarchy-resolve-fix [--user NAME] [--check] [--quiet]
+#
+#   --check   report status and exit non-zero if anything needs fixing;
+#             changes nothing.
+#   --user    which user should own the writable directories. Defaults to
+#             $SUDO_USER, then the current owner of /opt/resolve/Extras, then
+#             the sole /home user with a Resolve config directory.
+
+set -euo pipefail
+
+RESOLVE_LIBS=/opt/resolve/libs
+WRITABLE_DIRS=(/opt/resolve/Extras /opt/resolve/Fairlight)
+PANEL_LIBS=(libDaVinciPanelAPI.so libFairlightPanelAPI.so)
+
+check_only=0
+quiet=0
+target_user=""
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --check) check_only=1 ;;
+    --quiet) quiet=1 ;;
+    --user)  target_user=${2:-}; shift ;;
+    --user=*) target_user=${1#--user=} ;;
+    -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+say() { [[ $quiet -eq 1 ]] || echo "$@"; }
+problems=0
+
+if [[ ! -d /opt/resolve ]]; then
+  say "davinci-resolve is not installed at /opt/resolve -- nothing to do."
+  exit 0
+fi
+
+# --- work out who should own the writable directories ---------------------
+if [[ -z $target_user ]]; then
+  if [[ -n ${SUDO_USER:-} && ${SUDO_USER} != root ]]; then
+    target_user=$SUDO_USER
+  elif [[ -d ${WRITABLE_DIRS[0]} ]]; then
+    target_user=$(stat -c %U "${WRITABLE_DIRS[0]}")
+  else
+    # Sole /home user carrying a Resolve configuration directory.
+    mapfile -t candidates < <(
+      find /home -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read -r h; do
+        [[ -d "$h/.local/share/DaVinciResolve" ]] && basename "$h"
+      done
+    )
+    [[ ${#candidates[@]} -eq 1 ]] && target_user=${candidates[0]}
+  fi
+fi
+
+if [[ -z $target_user || $target_user == root ]]; then
+  echo "error: cannot determine which user should own Resolve's directories." >&2
+  echo "       re-run with --user NAME" >&2
+  exit 2
+fi
+
+if ! id "$target_user" >/dev/null 2>&1; then
+  echo "error: no such user: $target_user" >&2
+  exit 2
+fi
+target_group=$(id -gn "$target_user")
+
+if [[ $check_only -eq 0 && $EUID -ne 0 ]]; then
+  echo "error: run this with sudo -- sudo $0" >&2
+  exit 1
+fi
+
+say "DaVinci Resolve fixes (owner: $target_user:$target_group)"
+say
+
+# --- 1. writable content directories --------------------------------------
+for dir in "${WRITABLE_DIRS[@]}"; do
+  if [[ -d $dir ]] && sudo -u "$target_user" test -w "$dir"; then
+    say "  ok      $dir (writable)"
+    continue
+  fi
+  problems=$((problems + 1))
+  if [[ $check_only -eq 1 ]]; then
+    say "  MISSING $dir (not writable by $target_user)"
+    continue
+  fi
+  if [[ -d $dir ]]; then
+    say "  fixing  $dir (ownership)"
+    chown "$target_user:$target_group" "$dir"
+    chmod 755 "$dir"
+  else
+    say "  create  $dir"
+    install -d -o "$target_user" -g "$target_group" -m 755 "$dir"
+  fi
+done
+
+# --- 2. panel API libraries on the hardcoded dlopen path ------------------
+# /usr/lib64 is a symlink to /usr/lib on Arch, so linking into /usr/lib is
+# what makes the daemon's absolute /usr/lib64/... path resolve.
+for lib in "${PANEL_LIBS[@]}"; do
+  src="$RESOLVE_LIBS/$lib"
+  dest="/usr/lib/$lib"
+
+  if [[ ! -f $src ]]; then
+    say "  skip    $lib (not shipped in $RESOLVE_LIBS)"
+    continue
+  fi
+
+  if [[ -L $dest && $(readlink -f "$dest") == "$(readlink -f "$src")" && -r /usr/lib64/$lib ]]; then
+    say "  ok      /usr/lib64/$lib -> $src"
+    continue
+  fi
+
+  problems=$((problems + 1))
+  if [[ $check_only -eq 1 ]]; then
+    say "  MISSING /usr/lib64/$lib (panel daemon cannot dlopen it)"
+    continue
+  fi
+
+  if [[ -e $dest && ! -L $dest ]]; then
+    echo "  refusing to overwrite real file at $dest" >&2
+    continue
+  fi
+  say "  link    $dest -> $src"
+  ln -sfn "$src" "$dest"
+done
+
+[[ $check_only -eq 0 ]] && ldconfig 2>/dev/null || true
+
+say
+if [[ $check_only -eq 1 ]]; then
+  if [[ $problems -eq 0 ]]; then
+    say "All fixes are in place."
+  else
+    say "$problems item(s) need fixing -- re-run without --check as root."
+  fi
+  exit $(( problems > 0 ? 1 : 0 ))
+fi
+
+# --- verify ---------------------------------------------------------------
+fail=0
+for dir in "${WRITABLE_DIRS[@]}"; do
+  sudo -u "$target_user" test -w "$dir" \
+    || { echo "FAILED: $dir not writable by $target_user" >&2; fail=1; }
+done
+for lib in "${PANEL_LIBS[@]}"; do
+  [[ -f "$RESOLVE_LIBS/$lib" ]] || continue
+  [[ -r "/usr/lib64/$lib" ]] \
+    || { echo "FAILED: /usr/lib64/$lib not readable" >&2; fail=1; }
+done
+
+if [[ $fail -eq 0 ]]; then
+  say "All fixes verified."
+else
+  echo "Some fixes did not apply." >&2
+fi
+exit $fail

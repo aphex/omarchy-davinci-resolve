@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Wrapper for DaVinci Resolve on Omarchy/Hyprland.
+#
+# Two things Resolve gets wrong on this machine without help:
+#
+# 1. Platform plugin. Resolve bundles Qt5 with only libqxcb.so -- there is no
+#    Wayland plugin in /opt/resolve/libs/plugins/platforms. Omarchy exports
+#    QT_QPA_PLATFORM="wayland;xcb" globally, so Resolve probes Wayland, fails,
+#    and falls back. Pin xcb so it never probes.
+#
+# 2. HiDPI scale. With xwayland force_zero_scaling = true, Hyprland hands
+#    XWayland the native pixel buffer and the client must scale itself. Qt5
+#    instead derives an *integer* devicePixelRatio from the monitor's physical
+#    DPI: the 4K PA279CVs report ~163 DPI, so Qt picks 2.0 while Hyprland runs
+#    them at 1.5 -- Resolve's UI ends up ~33% larger than every other window.
+#    Pin QT_SCALE_FACTOR to the compositor scale of the display Resolve runs
+#    on -- see the monitor selection below.
+
+export QT_QPA_PLATFORM=xcb
+
+# Qt reads QT_SCALE_FACTOR once at startup and applies it to every screen, so
+# a multi-monitor Resolve session can only ever have one scale. This box has
+# two: the PA32QCV runs at 2, both PA279CVs at 1.5. Default to the display
+# Resolve primarily lives on and let it be overridden per launch.
+#
+#   RESOLVE_MONITOR=DP-1        use that monitor's Hyprland scale instead
+#   RESOLVE_SCALE=1.5           set the factor outright (wins over everything)
+#
+# For dual-screen work spanning the PA32QCV and a PA279CV there is no single
+# correct value; the default keeps the primary display exact and leaves the
+# secondary ~33% large. Spanning the two PA279CVs instead is pixel-correct on
+# both, since they share a scale -- launch that with RESOLVE_SCALE=1.5.
+
+preferred_monitor=${RESOLVE_MONITOR:-DP-2}
+scale=${RESOLVE_SCALE:-}
+
+if [[ -z $scale ]] && command -v hyprctl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  monitors=$(hyprctl -j monitors 2>/dev/null)
+  # The preferred display, when it is actually connected and enabled.
+  scale=$(jq -r --arg m "$preferred_monitor" \
+    'first(.[] | select(.name == $m and .disabled == false) | .scale) // empty' \
+    <<<"$monitors" 2>/dev/null)
+  # Otherwise fall back to whichever display has focus.
+  [[ -z $scale ]] && scale=$(jq -r \
+    'first(.[] | select(.focused == true) | .scale) // empty' \
+    <<<"$monitors" 2>/dev/null)
+fi
+
+# Only override Qt's own detection when we actually learned a scale.
+if [[ -n $scale ]]; then
+  export QT_AUTO_SCREEN_SCALE_FACTOR=0
+  export QT_ENABLE_HIGHDPI_SCALING=0
+  export QT_SCALE_FACTOR=$scale
+fi
+
+# GDK_SCALE=2 is exported session-wide for GTK apps; Resolve is pure Qt and a
+# stray GDK_SCALE only confuses the portal file picker.
+unset GDK_SCALE
+
+# The Resolve Mini Panel (USB 1edb:da0a) is currently rejected by the panel
+# daemon -- ~/.local/share/DaVinciResolve/logs/panel.log records
+# "Unknown panel 1296649801" (that number is ASCII 'MINI'), and Resolve logs
+# "Unsupported DaVinci Panel API Version (0.0), please update". The daemon's
+# firmware gate ("Firmware not up to date on panel %i, panel ignored") is the
+# likely cause. Try the DaVinci Control Panels Setup app first to flash the
+# panel properly; if that will not run, uncommenting this skips the gate.
+# export DAVINCI_PANELS_NO_FIRMWARE_CHECK=1
+
+cd /opt/resolve || exit 1
+exec /opt/resolve/bin/resolve "$@"
