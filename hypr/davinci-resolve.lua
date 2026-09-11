@@ -1,16 +1,38 @@
 -- DaVinci Resolve window rules for Hyprland under Omarchy.
 --
--- Omarchy 4.0.1 ships rules that make Resolve float, stay focused and fully
--- opaque, but its modal dialogs still trap the pointer: focus-follows-mouse
--- warps the cursor back into the dialog, so Preferences > Media Storage > Add
--- becomes a roach motel and the screenshot selector never sees the pointer.
+-- Verified against Omarchy 4.0.3, Hyprland 0.56.2, Resolve Studio 21.1 build 17.
 --
--- This is omarchy PR #6919, which had not landed in 4.0.1. Drop these lines
--- into ~/.config/hypr/hyprland.lua (they load after Omarchy's defaults and
--- override them). Remove once an Omarchy release includes the PR.
+-- Omarchy's own rules (default/hypr/apps/davinci-resolve.lua) put
+-- stay_focused = true on *every* Resolve window, then exempt a short allowlist
+-- of window titles. The allowlist has never kept up with Resolve:
+--
+--   * 21.1's "Project Settings" is not on it.
+--   * Resolve's transient popups, menus and file pickers all map with the
+--     generic title "resolve", so they are not on it either. (Confirm with
+--     `xdotool search --class resolve getwindowname %@` while one is open.)
+--
+-- Every window that misses the allowlist pins the focus. With one modal up
+-- that merely looks like a modal grab; open a second from inside the first --
+-- Project Settings -> a file picker, Preferences -> Media Storage -> Add --
+-- and the two fight over focus, so clicks land on the wrong window or appear
+-- to do nothing at all.
+--
+-- no_follow_mouse is what actually fixes the original complaint (focus follows
+-- the mouse, so Hyprland warps the pointer back into the dialog). stay_focused
+-- buys nothing on top of it, so drop it for Resolve outright. A later rule of
+-- the same type wins, which is what lets this user-side rule neutralise
+-- Omarchy's.
+--
+-- Upstream status:
+--   PR #6919 (adds no_follow_mouse)  merged to `quattro` 2026-08-28, but NOT
+--                                    in the v4.0.3 tag -- still needs backport.
+--   PR #9508 (drops stay_focused)    open as of 2026-09-10.
+--
+-- Append to ~/.config/hypr/hyprland.lua -- user config loads after Omarchy's
+-- defaults -- then `hyprctl reload` and check `hyprctl configerrors`.
+-- Delete this block once an Omarchy release ships both PRs.
 
-o.window(".*[Rr]esolve.*", { no_follow_mouse = true })
-o.window({
-  class = ".*[Rr]esolve.*",
-  title = "^(DaVinci Resolve( Studio)? - .+|Project Manager|Preferences|Find Directory|Dialog)$",
-}, { stay_focused = false })
+o.window(".*[Rr]esolve.*", { no_follow_mouse = true, stay_focused = false })
+
+-- Optional: the Project Manager opens undersized on a HiDPI display.
+-- o.window({ class = "^resolve$", title = "^Project Manager$" }, { center = true, size = { 1600, 1000 } })

@@ -16,6 +16,11 @@
 #      fetch its downloadable content packages -- including the ~2.2 GiB of
 #      TensorRT engines behind the entire DaVinci Neural Engine feature set.
 #
+#   1b. /opt/resolve/.license is shipped by the package but stays root-owned.
+#      Resolve Studio writes its activation there, so on a clean install the
+#      licence cannot be saved and Studio asks for the key on every launch.
+#      (Omarchy PR #10110's installer chowns this too, for the same reason.)
+#
 #   2. libDaVinciPanelAPI.so / libFairlightPanelAPI.so are never linked into
 #      /usr/lib64. DaVinciPanelDaemon and libDaVinciPanels.so dlopen() them by
 #      ABSOLUTE hardcoded path, so LD_LIBRARY_PATH cannot help. The dlopen
@@ -37,7 +42,7 @@
 set -euo pipefail
 
 RESOLVE_LIBS=/opt/resolve/libs
-WRITABLE_DIRS=(/opt/resolve/Extras /opt/resolve/Fairlight)
+WRITABLE_DIRS=(/opt/resolve/Extras /opt/resolve/Fairlight /opt/resolve/.license)
 PANEL_LIBS=(libDaVinciPanelAPI.so libFairlightPanelAPI.so)
 
 check_only=0
@@ -93,6 +98,17 @@ if ! id "$target_user" >/dev/null 2>&1; then
 fi
 target_group=$(id -gn "$target_user")
 
+# Test writability as the target user. Only reach for sudo when we are not
+# already that user -- otherwise `omarchy-resolve-fix --check`, which is
+# documented as needing no privileges, would sit on a password prompt.
+writable_by_target() {
+  if [[ $(id -un) == "$target_user" ]]; then
+    test -w "$1"
+  else
+    sudo -u "$target_user" test -w "$1"
+  fi
+}
+
 if [[ $check_only -eq 0 && $EUID -ne 0 ]]; then
   echo "error: run this with sudo -- sudo $0" >&2
   exit 1
@@ -103,7 +119,7 @@ say
 
 # --- 1. writable content directories --------------------------------------
 for dir in "${WRITABLE_DIRS[@]}"; do
-  if [[ -d $dir ]] && sudo -u "$target_user" test -w "$dir"; then
+  if [[ -d $dir ]] && writable_by_target "$dir"; then
     say "  ok      $dir (writable)"
     continue
   fi
@@ -153,12 +169,32 @@ for lib in "${PANEL_LIBS[@]}"; do
   ln -sfn "$src" "$dest"
 done
 
+# --- 3. is the repair actually wired to run on upgrade? -------------------
+# Everything above is undone by a package upgrade, so the pacman hook is the
+# part that makes this stick. It is easy to clone this repo, apply the fixes by
+# hand and never run install.sh -- in which case the next upgrade silently
+# breaks things again with nothing to point at. Report it rather than fix it:
+# installing the hook is install.sh's job and needs the desktop user's name.
+HOOK=/etc/pacman.d/hooks/99-davinci-resolve-fix.hook
+INSTALLED_BIN=/usr/local/bin/omarchy-resolve-fix
+hook_missing=0
+
+if [[ -f $HOOK && -x $INSTALLED_BIN ]]; then
+  say "  ok      pacman hook installed (fixes re-apply on upgrade)"
+else
+  hook_missing=1
+  say "  WARN    pacman hook NOT installed -- these fixes will be lost on the"
+  say "          next davinci-resolve upgrade. Run: sudo bash install.sh"
+fi
+
 [[ $check_only -eq 0 ]] && ldconfig 2>/dev/null || true
 
 say
 if [[ $check_only -eq 1 ]]; then
-  if [[ $problems -eq 0 ]]; then
+  if [[ $problems -eq 0 && $hook_missing -eq 0 ]]; then
     say "All fixes are in place."
+  elif [[ $problems -eq 0 ]]; then
+    say "All fixes are in place, but nothing will re-apply them on upgrade."
   else
     say "$problems item(s) need fixing -- re-run without --check as root."
   fi
@@ -168,7 +204,7 @@ fi
 # --- verify ---------------------------------------------------------------
 fail=0
 for dir in "${WRITABLE_DIRS[@]}"; do
-  sudo -u "$target_user" test -w "$dir" \
+  writable_by_target "$dir" \
     || { echo "FAILED: $dir not writable by $target_user" >&2; fail=1; }
 done
 for lib in "${PANEL_LIBS[@]}"; do
