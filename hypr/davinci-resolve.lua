@@ -34,5 +34,22 @@
 
 o.window(".*[Rr]esolve.*", { no_follow_mouse = true, stay_focused = false })
 
+-- Resolve is XWayland-only, so Hyprland honours whatever geometry its dialogs
+-- ask for -- and on HiDPI they ask for far too little. Measured on 21.1:
+-- "Find Directory" opens at 322x400 every time and has to be dragged out by
+-- hand. 875x600 is Omarchy's own floating-window size, and close to where these
+-- land once resized. This is the third commit of PR #9508, which reaches it by
+-- tagging "+floating-window" instead -- that works from inside Omarchy's own
+-- config, but not from here: the rules that act on the tag are declared in
+-- default/hypr/apps/system.lua, which has already been evaluated by the time a
+-- user config loads. Setting the geometry directly sidesteps the ordering.
+--
+-- Only "Find Directory" is confirmed present in 21.1; the other titles come
+-- from #9508 and simply do not match if Resolve never uses them.
+o.window({
+  class = ".*[Rr]esolve.*",
+  title = "^(Find Directory|Open|Save As|Project Media Location)$",
+}, { float = true, center = true, size = { 875, 600 } })
+
 -- Optional: the Project Manager opens undersized on a HiDPI display.
 -- o.window({ class = "^resolve$", title = "^Project Manager$" }, { center = true, size = { 1600, 1000 } })

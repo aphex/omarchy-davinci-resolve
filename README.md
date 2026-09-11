@@ -196,6 +196,17 @@ nothing here. Dropping it outright is
 2026-09-10), whose own summary notes the rule "has needed a longer release
 allowlist in each of the last three changes".
 
+**Layer three: dialogs open undersized.** Resolve is XWayland-only, so Hyprland
+honours whatever geometry its dialogs ask for, and on HiDPI they ask for far too
+little. Measured on 21.1, **Find Directory** opens at 322x400 every single time
+and has to be dragged out by hand. The rules set it to 875x600 — Omarchy's own
+floating-window size, and close to where it lands once resized.
+
+PR #9508 reaches this by tagging `+floating-window`, which works from inside
+Omarchy's config but *not* from a user one: the rules that act on that tag live
+in `default/hypr/apps/system.lua`, already evaluated by the time user config
+loads. Setting the geometry directly sidesteps the ordering.
+
 Append [`hypr/davinci-resolve.lua`](hypr/davinci-resolve.lua) to
 `~/.config/hypr/hyprland.lua` — user config loads after Omarchy's defaults, and
 a later rule of the same type wins, which is what lets it neutralise Omarchy's —
