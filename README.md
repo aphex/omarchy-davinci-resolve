@@ -336,6 +336,11 @@ Healthy output names the build and the packages it found — for 21.1, `DDM 1.4-
 (Linux/x86_64), DaVinci Resolve Studio 21.1 build 17` followed by
 `2 known packages installed totalling 2.25 GiB`.
 
+**Upgrading Resolve itself** — bumping `pkgver`, the checksum, and the
+bundled-library globs in the AUR PKGBUILD — is written up separately in
+[`aur/README.md`](aur/README.md), along with the patch to reapply. yay wipes its
+cache directory on every update, so those edits do not survive on their own.
+
 **Window rules are the part that does change between releases.** Resolve adds
 and renames dialogs, and Omarchy's title allowlist lags behind — re-check the
 titles after any Resolve upgrade with the `xdotool` one-liner above.
@@ -356,6 +361,7 @@ in Resolve's Linux build and there is no workaround from outside the binary.
 | `bin/omarchy-resolve-fix` | Idempotent repair; `--check` to audit, `--user` to set owner |
 | `bin/davinci-resolve` | Launcher wrapper: pins `xcb`, sets `QT_SCALE_FACTOR`, drops `GDK_SCALE` |
 | `hypr/davinci-resolve.lua` | Hyprland window rules (backports PRs #6919 and #9508) |
+| `aur/` | Building the AUR package by hand, and the local PKGBUILD patch |
 
 ## Upstream
 
